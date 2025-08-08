@@ -17,8 +17,10 @@ class TestGoogleDriveOrganizer(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.organizer = GoogleDriveOrganizer()
-        self.organizer.service = Mock()
+        # Mock the authentication to avoid requiring real credentials
+        with patch.object(GoogleDriveOrganizer, 'authenticate'):
+            self.organizer = GoogleDriveOrganizer()
+            self.organizer.service = Mock()
     
     def test_classify_file_bank_statement(self):
         """Test classification of bank statement files."""
@@ -122,7 +124,9 @@ class TestFileClassification(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.organizer = GoogleDriveOrganizer()
+        # Mock the authentication to avoid requiring real credentials
+        with patch.object(GoogleDriveOrganizer, 'authenticate'):
+            self.organizer = GoogleDriveOrganizer()
     
     def test_company_patterns(self):
         """Test various company name patterns."""
@@ -156,6 +160,16 @@ class TestFileClassification(unittest.TestCase):
             with self.subTest(filename=filename):
                 _, statement_type = self.organizer.classify_file(filename)
                 self.assertEqual(statement_type, expected_type)
+    
+    def test_debug_classification(self):
+        """Debug test to see what's happening with classification."""
+        filename = "chase_bank_statement.pdf"
+        company, statement_type = self.organizer.classify_file(filename)
+        print(f"Debug: filename='{filename}', company='{company}', statement_type='{statement_type}'")
+        
+        # This should help us understand what's happening
+        self.assertIsNotNone(company, f"Company should be found for {filename}")
+        self.assertIsNotNone(statement_type, f"Statement type should be found for {filename}")
 
 
 if __name__ == '__main__':

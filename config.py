@@ -5,10 +5,10 @@ Configuration file for Google Drive Statement Organizer
 # Company patterns for classification
 COMPANY_PATTERNS = {
     'chase': ['chase', 'jpmorgan', 'jpm', 'jp morgan'],
-    'wells fargo': ['wells fargo', 'wellsfargo', 'wells'],
-    'bank of america': ['bank of america', 'bofa', 'boa', 'bankofamerica'],
+    'wells fargo': ['wells fargo', 'wells_fargo', 'wellsfargo', 'wells'],
+    'bank of america': ['bank of america', 'bank_of_america', 'bofa', 'boa', 'bankofamerica'],
     'capital one': ['capital one', 'capitalone', 'capone'],
-    'american express': ['american express', 'amex', 'americanexpress', 'american-express'],
+    'american express': ['american express', 'american_express', 'amex', 'americanexpress', 'american-express'],
     'citi': ['citi', 'citibank', 'citigroup'],
     'us bank': ['us bank', 'usbank', 'usb'],
     'pnc': ['pnc', 'pnc bank'],
@@ -192,33 +192,33 @@ COMPANY_PATTERNS = {
 # Statement type patterns for classification
 STATEMENT_PATTERNS = {
     'bank statement': [
-        'bank statement', 'checking statement', 'savings statement', 
+        'bank statement', 'bank_statement', 'checking statement', 'savings statement', 
         'account statement', 'monthly statement', 'checking account',
         'savings account', 'deposit account', 'transaction history'
     ],
     'credit card statement': [
-        'credit card statement', 'card statement', 'credit card bill',
+        'credit card statement', 'credit_card_statement', 'card statement', 'credit card bill',
         'card bill', 'credit statement', 'card account statement',
         'credit account', 'card account'
     ],
     'investment statement': [
-        'investment statement', 'portfolio statement', 'brokerage statement',
+        'investment statement', 'investment_statement', 'portfolio statement', 'brokerage statement',
         'securities statement', 'investment account', 'portfolio account',
         'brokerage account', 'trading statement', 'investment summary',
         'portfolio summary', 'account summary'
     ],
     'loan statement': [
-        'loan statement', 'mortgage statement', 'lending statement',
+        'loan statement', 'loan_statement', 'mortgage statement', 'lending statement',
         'loan account', 'mortgage account', 'loan bill', 'mortgage bill',
         'payment statement', 'loan payment', 'mortgage payment'
     ],
     'insurance statement': [
-        'insurance statement', 'policy statement', 'insurance bill',
+        'insurance statement', 'insurance_statement', 'policy statement', 'insurance bill',
         'policy bill', 'insurance premium', 'policy premium',
         'coverage statement', 'benefits statement'
     ],
     'utility statement': [
-        'utility statement', 'electric bill', 'gas bill', 'water bill',
+        'utility statement', 'utility_statement', 'electric bill', 'gas bill', 'water bill',
         'internet bill', 'phone bill', 'cable bill', 'utility bill',
         'service statement', 'utility service'
     ],

@@ -190,51 +190,20 @@ class GoogleDriveOrganizer:
         company = None
         statement_type = None
         
-        # Common company patterns
-        company_patterns = {
-            'chase': ['chase', 'jpmorgan', 'jpm'],
-            'wells fargo': ['wells fargo', 'wellsfargo'],
-            'bank of america': ['bank of america', 'bofa', 'boa'],
-            'capital one': ['capital one', 'capitalone'],
-            'american express': ['american express', 'amex', 'americanexpress'],
-            'citi': ['citi', 'citibank', 'citigroup'],
-            'us bank': ['us bank', 'usbank'],
-            'pnc': ['pnc'],
-            'td bank': ['td bank', 'tdbank'],
-            'synchrony': ['synchrony', 'synchrony bank'],
-            'discover': ['discover'],
-            'barclays': ['barclays'],
-            'fidelity': ['fidelity'],
-            'vanguard': ['vanguard'],
-            'schwab': ['schwab', 'charles schwab'],
-            'etrade': ['etrade', 'e*trade'],
-            'robinhood': ['robinhood'],
-            'coinbase': ['coinbase'],
-            'paypal': ['paypal'],
-            'stripe': ['stripe']
-        }
-        
-        # Statement type patterns
-        statement_patterns = {
-            'bank statement': ['bank statement', 'checking', 'savings', 'account statement'],
-            'credit card statement': ['credit card', 'credit card statement', 'card statement'],
-            'investment statement': ['investment', 'portfolio', 'brokerage', 'securities'],
-            'loan statement': ['loan', 'mortgage', 'lending'],
-            'insurance statement': ['insurance', 'policy'],
-            'utility statement': ['utility', 'electric', 'gas', 'water', 'internet', 'phone']
-        }
+        # Import patterns from config
+        from config import COMPANY_PATTERNS, STATEMENT_PATTERNS
         
         # Analyze filename
         file_lower = file_name.lower()
         
         # Find company
-        for company_name, patterns in company_patterns.items():
+        for company_name, patterns in COMPANY_PATTERNS.items():
             if any(pattern in file_lower for pattern in patterns):
                 company = company_name
                 break
         
         # Find statement type
-        for stmt_type, patterns in statement_patterns.items():
+        for stmt_type, patterns in STATEMENT_PATTERNS.items():
             if any(pattern in file_lower for pattern in patterns):
                 statement_type = stmt_type
                 break
@@ -246,14 +215,14 @@ class GoogleDriveOrganizer:
             
             # Find company in PDF content
             if not company:
-                for company_name, patterns in company_patterns.items():
+                for company_name, patterns in COMPANY_PATTERNS.items():
                     if any(pattern in pdf_lower for pattern in patterns):
                         company = company_name
                         break
             
             # Find statement type in PDF content
             if not statement_type:
-                for stmt_type, patterns in statement_patterns.items():
+                for stmt_type, patterns in STATEMENT_PATTERNS.items():
                     if any(pattern in pdf_lower for pattern in patterns):
                         statement_type = stmt_type
                         break
