@@ -16,6 +16,7 @@ import tempfile
 import concurrent.futures
 import threading
 from functools import partial
+from datetime import datetime
 
 import click
 from rich.console import Console
@@ -524,7 +525,7 @@ class GoogleDriveOrganizer:
             r'account\s+ending[:\s]+([0-9]{3,8})',  # account ending: 12345
             
             # Card patterns with masking
-            r'(?:x{4,}|\\*{4,})[^0-9]*([0-9]{4,5})',  # xxxx1234 or ****12345
+            r'(?:x{4,}|\*{4,})[^0-9]*([0-9]{4,5})',  # xxxx1234 or ****12345
             r'card\s+ending[:\s]*([0-9]{4,5})',  # card ending: 1234
             
             # Hyphenated patterns (common format)
@@ -532,7 +533,7 @@ class GoogleDriveOrganizer:
             r'([0-9]{6,8}-[0-9]{2,4})',  # 123456-78
             
             # Direct number patterns (be more selective)
-            r'\\b([0-9]{8,16})\\b',  # 8-16 digit standalone numbers
+            r'\b([0-9]{8,16})\b',  # 8-16 digit standalone numbers
         ]
         
         for pattern in account_patterns:
@@ -637,10 +638,17 @@ class GoogleDriveOrganizer:
                     't-mobile': ['t-mobile', 'tmobile'],
                     'paypal': ['paypal'],
                     'wise': ['wise'],
+                    'wells fargo': ['wells'],
+                    'bank of america': ['bank of america', 'bofa'],
+                    'apple': ['apple'],
+                    'td bank': ['td bank', 'td'],
+                    'at&t': ['at&t', 'att'],
+                    'swan bitcoin': ['swan'],
+                    'okcoin': ['okcoin', 'ok coin'],
                 }
                 
                 # Check company match
-                if company.lower() in company_patterns:
+                if company and company.lower() in company_patterns:
                     patterns = company_patterns[company.lower()]
                     for pattern in patterns:
                         if pattern in folder_name:
@@ -662,17 +670,17 @@ class GoogleDriveOrganizer:
                                 match_reasons.append(f'partial_account:{partial}')
                                 break
                 
-                # Statement type matching
+                # Statement type matching (more flexible)
                 type_patterns = {
                     'bank statement': ['checking', 'savings', 'money', 'bank'],
                     'credit card statement': ['credit', 'card'],
                     'investment statement': ['brokerage', 'ira', 'broker', 'investment'],
                     'loan statement': ['loan'],
                     'utility statement': ['bill', 'utility'],
-                    'monthly statement': ['statement']
+                    'monthly statement': ['statement', 'checking', 'savings', 'money']  # Monthly can be bank statements
                 }
                 
-                if statement_type in type_patterns:
+                if statement_type and statement_type in type_patterns:
                     patterns = type_patterns[statement_type]
                     for pattern in patterns:
                         if pattern in folder_name:
@@ -692,12 +700,28 @@ class GoogleDriveOrganizer:
                 best_matches.sort(key=lambda x: x['score'], reverse=True)
                 best_match = best_matches[0]
                 
-                # Only return if we have a reasonable confidence (score >= 15)
-                if best_match['score'] >= 15:
+                # Check for exact company name matches as fallback (case insensitive)
+                if best_match['score'] < 15 and company:
+                    for folder in folders:
+                        folder_name = folder['name'].lower()
+                        if company.lower() == folder_name or company.lower() in folder_name:
+                            console.print(f"[dim]✅ Fallback match to existing folder: {folder['name']} (exact company name)[/dim]")
+                            return folder['id']
+                
+                # Lower threshold for better matches (score >= 10)
+                if best_match['score'] >= 10:
                     console.print(f"[dim]✅ Matched to existing folder: {best_match['folder']['name']} (score: {best_match['score']}, reasons: {', '.join(best_match['reasons'])})[/dim]")
                     return best_match['folder']['id']
                 else:
                     console.print(f"[dim]⚠️  Low confidence match for {company}/{statement_type}, will create new folder[/dim]")
+            
+            # Final fallback: check for exact company name matches when no scored matches found
+            if company:
+                for folder in folders:
+                    folder_name = folder['name'].lower()
+                    if company.lower() == folder_name or company.lower() in folder_name:
+                        console.print(f"[dim]✅ Final fallback match: {folder['name']} (company name found)[/dim]")
+                        return folder['id']
             
             return None
             
