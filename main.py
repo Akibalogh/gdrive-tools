@@ -30,6 +30,8 @@ from googleapiclient.http import MediaIoBaseDownload
 import PyPDF2
 import io
 
+from file_mapping import FileMapping
+
 # Load environment variables
 load_dotenv()
 
@@ -51,6 +53,7 @@ class GoogleDriveOrganizer:
         self.credentials_file = credentials_file
         self.token_file = token_file
         self.service = None
+        self.file_mapping = FileMapping()
         self.authenticate()
     
     def authenticate(self):
@@ -200,8 +203,16 @@ class GoogleDriveOrganizer:
             console.print(f"[yellow]Warning: Could not extract text from PDF: {e}[/yellow]")
             return ""
     
-    def classify_file(self, file_name: str, file_content: Optional[bytes] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def classify_file(self, file_name: str, file_content: Optional[bytes] = None, file_id: str = None, file_size: str = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Classify a file based on filename and optionally content. Returns (company, statement_type, account_info)."""
+        
+        # Check cache first if we have file ID
+        if file_id:
+            cached_result = self.file_mapping.get_classification(file_id, file_name, file_size)
+            if cached_result:
+                console.print(f"[dim]Using cached result for {file_name}[/dim]")
+                return cached_result
+        
         company = None
         statement_type = None
         account_info = None
@@ -249,6 +260,10 @@ class GoogleDriveOrganizer:
             # Extract account info from PDF content if not found in filename
             if not account_info:
                 account_info = self.extract_account_info_from_text(pdf_text)
+        
+        # Cache the result if we have file ID
+        if file_id:
+            self.file_mapping.set_classification(file_id, file_name, company, statement_type, account_info, file_size)
         
         return company, statement_type, account_info
     
@@ -463,8 +478,13 @@ class GoogleDriveOrganizer:
                     # Download file content for analysis
                     file_content = self.download_file(file['id'])
                     
-                    # Classify the file
-                    company, statement_type, account_info = self.classify_file(file['name'], file_content)
+                    # Classify the file (with caching)
+                    company, statement_type, account_info = self.classify_file(
+                        file['name'], 
+                        file_content, 
+                        file_id=file['id'], 
+                        file_size=file.get('size')
+                    )
                     
                     if not company or not statement_type:
                         console.print(f"[yellow]Could not classify: {file['name']}[/yellow]")
@@ -533,8 +553,10 @@ class GoogleDriveOrganizer:
 @click.option('--dry-run', is_flag=True, help='Preview changes without making them')
 @click.option('--monthly-statements', default='Monthly Statements', help='Name of monthly statements folder')
 @click.option('--statements-by-account', default='Statements by Account', help='Name of statements by account folder')
+@click.option('--clear-cache', is_flag=True, help='Clear the file classification cache')
+@click.option('--export-cache', help='Export cache to specified file')
 def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_run: bool, 
-         monthly_statements: str, statements_by_account: str):
+         monthly_statements: str, statements_by_account: str, clear_cache: bool, export_cache: str):
     """Organize Google Drive statements by company and type."""
     
     console.print("[bold green]Google Drive Statement Organizer[/bold green]")
@@ -548,6 +570,17 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
     except Exception as e:
         console.print(f"[red]Failed to initialize: {e}[/red]")
         return 1
+    
+    # Handle cache operations
+    if clear_cache:
+        organizer.file_mapping.clear_cache()
+        console.print("[green]✓ Cache cleared successfully[/green]")
+        return 0
+    
+    if export_cache:
+        export_file = organizer.file_mapping.export_mapping(export_cache)
+        console.print(f"[green]✓ Cache exported to {export_file}[/green]")
+        return 0
     
     # Find folders if IDs not provided
     if not source_folder_id:
@@ -582,6 +615,14 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
     table.add_row("Errors", str(stats['errors']))
     
     console.print(table)
+    
+    # Show cache statistics
+    cache_stats = organizer.file_mapping.get_cache_stats()
+    console.print(f"\n[bold blue]Cache Statistics:[/bold blue]")
+    console.print(f"📁 Total cached files: {cache_stats['total_cached_files']}")
+    console.print(f"✅ Classified files: {cache_stats['classified_files']}")
+    console.print(f"❓ Unclassified files: {cache_stats['unclassified_files']}")
+    console.print(f"💾 Cache file size: {cache_stats['cache_file_size']} bytes")
     
     return 0
 
