@@ -220,7 +220,8 @@ STATEMENT_PATTERNS = {
     'utility statement': [
         'utility statement', 'utility_statement', 'electric bill', 'gas bill', 'water bill',
         'internet bill', 'phone bill', 'cable bill', 'utility bill',
-        'service statement', 'utility service'
+        'service statement', 'utility service', 'bill', 'detailed bill', 
+        'monthly bill', 'service bill', 'telecom bill', 'wireless bill'
     ],
     'monthly statement': [
         'monthly statement', 'monthly_statement', 'statement', 'monthly bill',

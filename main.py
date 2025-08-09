@@ -13,6 +13,9 @@ import logging
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import tempfile
+import concurrent.futures
+import threading
+from functools import partial
 
 import click
 from rich.console import Console
@@ -31,6 +34,53 @@ import PyPDF2
 import io
 
 from file_mapping import FileMapping
+
+class ProcessedFilesTracker:
+    """Track files that have already been processed to avoid duplicates."""
+    
+    def __init__(self, cache_file: str = 'processed_files.json'):
+        self.cache_file = cache_file
+        self.processed_files = self._load_cache()
+    
+    def _load_cache(self) -> Dict:
+        """Load processed files cache from disk."""
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+    
+    def _save_cache(self):
+        """Save processed files cache to disk."""
+        try:
+            with open(self.cache_file, 'w') as f:
+                json.dump(self.processed_files, f, indent=2)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not save processed files cache: {e}[/yellow]")
+    
+    def is_processed(self, file_id: str, file_name: str, target_folder_id: str) -> bool:
+        """Check if a file has already been processed."""
+        key = f"{file_id}:{target_folder_id}"
+        return key in self.processed_files
+    
+    def mark_processed(self, file_id: str, file_name: str, target_folder_id: str, target_folder_name: str):
+        """Mark a file as processed."""
+        key = f"{file_id}:{target_folder_id}"
+        self.processed_files[key] = {
+            'file_name': file_name,
+            'target_folder_name': target_folder_name,
+            'processed_at': datetime.now().isoformat()
+        }
+        self._save_cache()
+    
+    def get_stats(self) -> Dict:
+        """Get statistics about processed files."""
+        return {
+            'total_processed': len(self.processed_files),
+            'cache_file': self.cache_file
+        }
 
 # Load environment variables
 load_dotenv()
@@ -54,6 +104,7 @@ class GoogleDriveOrganizer:
         self.token_file = token_file
         self.service = None
         self.file_mapping = FileMapping()
+        self.processed_tracker = ProcessedFilesTracker()
         self.authenticate()
     
     def authenticate(self):
@@ -544,7 +595,7 @@ class GoogleDriveOrganizer:
             return None
     
     def find_target_folder(self, dest_folder_id: str, company: str, statement_type: str, account_info: Optional[str]) -> Optional[str]:
-        """Find the best matching existing folder for this statement."""
+        """Find the best matching existing folder for this statement using smart matching."""
         try:
             # Get all folders in Statements by Account
             results = self.service.files().list(
@@ -554,23 +605,105 @@ class GoogleDriveOrganizer:
             ).execute()
             folders = results.get('files', [])
             
-            # Define company and type keywords
-            company_keywords = {
-                'american express': ['amex', 'american express', 'blue'],
-                'chase': ['chase', 'freedom'],
-                'citi': ['citi', 'best buy', 'american airlines', 'double cash'],
-                'schwab': ['schwab'],
-                'capital one': ['capital one', 'quicksilver'],
-                'synchrony': ['synchrony', 'amazon store'],
-                'sofi': ['sofi'],
-            }
+            # Extract account digits from account_info if available
+            account_digits = None
+            if account_info:
+                import re
+                # Extract all digits from account info
+                digits = re.findall(r'\d+', str(account_info))
+                if digits:
+                    # Try to get last 4-5 digits from the longest number
+                    longest_digits = max(digits, key=len)
+                    if len(longest_digits) >= 4:
+                        account_digits = longest_digits[-5:] if len(longest_digits) >= 5 else longest_digits[-4:]
             
-            type_keywords = {
-                'bank statement': ['checking', 'savings', 'money'],
-                'credit card statement': ['credit', 'card'],
-                'investment statement': ['brokerage', 'ira', 'broker'],
-                'loan statement': ['loan'],
-            }
+            # Smart folder matching logic
+            best_matches = []
+            
+            for folder in folders:
+                folder_name = folder['name'].lower()
+                match_score = 0
+                match_reasons = []
+                
+                # Company matching with flexible patterns
+                company_patterns = {
+                    'american express': ['amex', 'american express', 'blue'],
+                    'chase': ['chase', 'freedom'],
+                    'citi': ['citi', 'best buy', 'american airlines', 'double cash'],
+                    'schwab': ['schwab', 'charles schwab'],
+                    'capital one': ['capital one', 'quicksilver', 'savor'],
+                    'synchrony': ['synchrony', 'amazon store'],
+                    'sofi': ['sofi'],
+                    't-mobile': ['t-mobile', 'tmobile'],
+                    'paypal': ['paypal'],
+                    'wise': ['wise'],
+                }
+                
+                # Check company match
+                if company.lower() in company_patterns:
+                    patterns = company_patterns[company.lower()]
+                    for pattern in patterns:
+                        if pattern in folder_name:
+                            match_score += 10
+                            match_reasons.append(f'company:{pattern}')
+                            break
+                
+                # Check account number match (highest priority)
+                if account_digits:
+                    if account_digits in folder_name:
+                        match_score += 50  # High priority for exact account match
+                        match_reasons.append(f'account:{account_digits}')
+                    else:
+                        # Try partial matches (last 3-4 digits)
+                        for i in range(3, min(len(account_digits) + 1, 6)):
+                            partial = account_digits[-i:]
+                            if partial in folder_name and len(partial) >= 3:
+                                match_score += 20 + i  # More points for longer matches
+                                match_reasons.append(f'partial_account:{partial}')
+                                break
+                
+                # Statement type matching
+                type_patterns = {
+                    'bank statement': ['checking', 'savings', 'money', 'bank'],
+                    'credit card statement': ['credit', 'card'],
+                    'investment statement': ['brokerage', 'ira', 'broker', 'investment'],
+                    'loan statement': ['loan'],
+                    'utility statement': ['bill', 'utility'],
+                    'monthly statement': ['statement']
+                }
+                
+                if statement_type in type_patterns:
+                    patterns = type_patterns[statement_type]
+                    for pattern in patterns:
+                        if pattern in folder_name:
+                            match_score += 5
+                            match_reasons.append(f'type:{pattern}')
+                            break
+                
+                if match_score > 0:
+                    best_matches.append({
+                        'folder': folder,
+                        'score': match_score,
+                        'reasons': match_reasons
+                    })
+            
+            if best_matches:
+                # Sort by score (highest first)
+                best_matches.sort(key=lambda x: x['score'], reverse=True)
+                best_match = best_matches[0]
+                
+                # Only return if we have a reasonable confidence (score >= 15)
+                if best_match['score'] >= 15:
+                    console.print(f"[dim]✅ Matched to existing folder: {best_match['folder']['name']} (score: {best_match['score']}, reasons: {', '.join(best_match['reasons'])})[/dim]")
+                    return best_match['folder']['id']
+                else:
+                    console.print(f"[dim]⚠️  Low confidence match for {company}/{statement_type}, will create new folder[/dim]")
+            
+            return None
+            
+        except Exception as e:
+            console.print(f"[red]Error in folder matching: {str(e)}[/red]")
+            return None
             
             if account_info:
                 account_digits = self.get_last_digits(account_info, 4)
@@ -736,9 +869,10 @@ class GoogleDriveOrganizer:
 @click.option('--rename-folders', is_flag=True, help='Rename folders with confirmed account numbers')
 @click.option('--backup-folders', is_flag=True, help='Create backup of current folder structure')
 @click.option('--test-rename', help='Test renaming a single folder (format: "old_name,new_name")')
+@click.option('--workers', default=4, help='Number of parallel workers for processing (default: 4)')
 def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_run: bool, 
          monthly_statements: str, statements_by_account: str, clear_cache: bool, export_cache: str,
-         rename_folders: bool, backup_folders: bool, test_rename: str):
+         rename_folders: bool, backup_folders: bool, test_rename: str, workers: int):
     """Organize Google Drive statements by company and type."""
     
     console.print("[bold green]Google Drive Statement Organizer[/bold green]")
@@ -803,44 +937,42 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
     
     if rename_folders:
         # Define confirmed renamings
-        # Complete mapping for all 25 folders
+        # Final mapping - only add account numbers where missing, keep all existing numbers
         confirmed_renames = {
-            # Chase (2 accounts)
-            "Chase Freedom Statement": "Chase Freedom -64649",
-            "Chase Amazon Prime Statement": "Chase Amazon Prime -11014",
+            # Add account numbers to folders that are missing them
+            "Chase Freedom Card": "Chase Freedom Card -64649",
+            "Amazon Store Card - Synchrony": "Amazon Store Card - Synchrony -27717",
+            "Citi Double Cash Personal": "Citi Double Cash Personal -80521",
+            "AmEx Blue Cash": "AmEx Blue Cash -84002",  # Updated from screenshot
+            "Capital One Quicksilver Credit Card": "Capital One Quicksilver Credit Card -40318",
+            "Personal PayPal": "Personal PayPal -53762",
+            "SoFi Money": "SoFi Money -20516",
+            "Wise": "Wise -18903",
             
-            # Citi (3 accounts) 
-            "Citi Double Cash Statement": "Citi Double Cash -80521",
-            "Citi American Airlines Statement": "Citi American Airlines -35086",
-            "Citi Best Buy Statement": "Citi Best Buy -91383",
+            # AmEx cards from screenshot
+            "AmEx Blue Business Cash": "AmEx Blue Business Cash -41003",  # Blue Business Cash(TM)
+            "Blue Business Plus Credit Card": "Blue Business Plus Credit Card -61005",  # Schwab Investor Card
+            "AmEx Personal Loan": "AmEx Personal Loan -91003",  # Cancelled but keep for archival
             
-            # American Express (4 accounts)
-            "American Express Blue Cash Statement": "American Express Blue Cash -91005",
-            "American Express Gold Card Statement": "American Express Gold Card -41004",
-            "American Express Platinum Card Statement": "American Express Platinum Card -31002", 
-            "American Express Business Gold Statement": "American Express Business Gold -71007",
+            # SoFi accounts
+            "SoFi Loan": "SoFi Loan -61582",  # From PDF: Account Number PA-761582
             
-            # Capital One (2 accounts)
-            "Capital One Quicksilver Statement": "Capital One Quicksilver -40318",
-            "Capital One Savor Statement": "Capital One Savor -40906",
+            # Mark unresolved account
+            "Schwab Business American Express": "Schwab Business American Express -UNRESOLVED",
             
-            # Schwab (5 accounts)
-            "Schwab Brokerage Statement": "Schwab Brokerage -23115",
-            "Schwab AmEx Platinum Statement": "Schwab AmEx Platinum -91003",
-            "Schwab Bank Statement": "Schwab Bank -06914",
-            "Roth IRA Robo -121": "Roth IRA Robo -73121",  # From PDF!
-            "Roth IRA Manual -625": "Roth IRA Manual -24625",  # From PDF!
+            # Simplify crypto name only
+            "Swan Bitcoin / Prime Trust LLC": "Swan Bitcoin"
             
-            # Other Financial (5 accounts)
-            "SoFi Money Statement": "SoFi Money -20516", 
-            "PayPal Statement": "PayPal -53762",
-            "Wise Statement": "Wise -18903",
-            "Amazon Statement": "Amazon -27717",
-            "AltoIRA": "AltoIRA -48915",  # User provided
-            
-            # Crypto (2 accounts - simplified names)
-            "Swan Bitcoin / Prime Trust LLC": "Swan Bitcoin",
-            "OkCoin": "OkCoin"  # Already simple
+            # KEEP ALL EXISTING ACCOUNT NUMBERS AS-IS:
+            # ✅ "Citi American Airlines -5619" (existing -5619 is likely correct)
+            # ✅ "Citi Best Buy -1383" (existing -1383 matches our -91383)
+            # ✅ "Personal Brokerage -608" (existing -608)
+            # ✅ "Personal Checking -624" (existing -624)
+            # ✅ "Business Checking -417" (existing -417)
+            # ✅ "Antifragile Broker -485" (existing -485)
+            # ✅ "Schwab Checking -7641" (existing -7641)
+            # ✅ "OkCoin" (already correct)
+            # ✅ "IRA Accounts - Not reconciled anymore - Skip" (contains subfolders)
         }
         
         console.print(f"[bold yellow]Renaming {len(confirmed_renames)} folders with confirmed account numbers[/bold yellow]")
