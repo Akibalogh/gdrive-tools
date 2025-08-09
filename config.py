@@ -5,7 +5,7 @@ Configuration file for Google Drive Statement Organizer
 # Company patterns for classification
 COMPANY_PATTERNS = {
     'chase': ['chase', 'jpmorgan', 'jpm', 'jp morgan'],
-    'wells fargo': ['wells fargo', 'wells_fargo', 'wellsfargo', 'wells'],
+    'wells fargo': ['wells fargo', 'wells_fargo', 'wellsfargo', 'wells', 'wf'],
     'bank of america': ['bank of america', 'bank_of_america', 'bofa', 'boa', 'bankofamerica'],
     'capital one': ['capital one', 'capitalone', 'capone'],
     'american express': ['american express', 'american_express', 'amex', 'americanexpress', 'american-express'],
@@ -221,6 +221,10 @@ STATEMENT_PATTERNS = {
         'utility statement', 'utility_statement', 'electric bill', 'gas bill', 'water bill',
         'internet bill', 'phone bill', 'cable bill', 'utility bill',
         'service statement', 'utility service'
+    ],
+    'monthly statement': [
+        'monthly statement', 'monthly_statement', 'statement', 'monthly bill',
+        'account summary', 'billing statement'
     ],
     'tax statement': [
         'tax statement', 'tax document', 'tax form', 'tax return',

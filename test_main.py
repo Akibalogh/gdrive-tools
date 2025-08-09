@@ -25,34 +25,47 @@ class TestGoogleDriveOrganizer(unittest.TestCase):
     def test_classify_file_bank_statement(self):
         """Test classification of bank statement files."""
         filename = "chase_bank_statement_january_2024.pdf"
-        company, statement_type = self.organizer.classify_file(filename)
+        company, statement_type, account_info = self.organizer.classify_file(filename)
         
         self.assertEqual(company, "chase")
         self.assertEqual(statement_type, "bank statement")
+        self.assertIsNone(account_info)  # No account info in this filename
     
     def test_classify_file_credit_card(self):
         """Test classification of credit card statement files."""
         filename = "amex_credit_card_statement_february_2024.pdf"
-        company, statement_type = self.organizer.classify_file(filename)
+        company, statement_type, account_info = self.organizer.classify_file(filename)
         
         self.assertEqual(company, "american express")
         self.assertEqual(statement_type, "credit card statement")
+        self.assertIsNone(account_info)  # No account info in this filename
     
     def test_classify_file_investment(self):
         """Test classification of investment statement files."""
         filename = "fidelity_investment_statement_march_2024.pdf"
-        company, statement_type = self.organizer.classify_file(filename)
+        company, statement_type, account_info = self.organizer.classify_file(filename)
         
         self.assertEqual(company, "fidelity")
         self.assertEqual(statement_type, "investment statement")
+        self.assertIsNone(account_info)  # No account info in this filename
+    
+    def test_classify_file_with_account_info(self):
+        """Test classification with account information."""
+        filename = "schwab_investment_statement_account_1234-5678.pdf"
+        company, statement_type, account_info = self.organizer.classify_file(filename)
+        
+        self.assertEqual(company, "schwab")
+        self.assertEqual(statement_type, "investment statement")
+        self.assertEqual(account_info, "1234-5678")
     
     def test_classify_file_unknown_company(self):
         """Test classification with unknown company."""
         filename = "unknown_company_statement.pdf"
-        company, statement_type = self.organizer.classify_file(filename)
+        company, statement_type, account_info = self.organizer.classify_file(filename)
         
         self.assertIsNone(company)
         self.assertIsNone(statement_type)
+        self.assertIsNone(account_info)
     
     def test_extract_text_from_pdf(self):
         """Test PDF text extraction."""
@@ -142,7 +155,7 @@ class TestFileClassification(unittest.TestCase):
         
         for filename, expected_company in test_cases:
             with self.subTest(filename=filename):
-                company, _ = self.organizer.classify_file(filename)
+                company, _, _ = self.organizer.classify_file(filename)
                 self.assertEqual(company, expected_company)
     
     def test_statement_type_patterns(self):
@@ -158,14 +171,14 @@ class TestFileClassification(unittest.TestCase):
         
         for filename, expected_type in test_cases:
             with self.subTest(filename=filename):
-                _, statement_type = self.organizer.classify_file(filename)
+                _, statement_type, _ = self.organizer.classify_file(filename)
                 self.assertEqual(statement_type, expected_type)
     
     def test_debug_classification(self):
         """Debug test to see what's happening with classification."""
         filename = "chase_bank_statement.pdf"
-        company, statement_type = self.organizer.classify_file(filename)
-        print(f"Debug: filename='{filename}', company='{company}', statement_type='{statement_type}'")
+        company, statement_type, account_info = self.organizer.classify_file(filename)
+        print(f"Debug: filename='{filename}', company='{company}', statement_type='{statement_type}', account_info='{account_info}'")
         
         # This should help us understand what's happening
         self.assertIsNotNone(company, f"Company should be found for {filename}")

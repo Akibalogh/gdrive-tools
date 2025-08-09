@@ -99,15 +99,30 @@ class GoogleDriveOrganizer:
             console.print(f"[red]Error finding folder '{folder_name}': {error}[/red]")
             return None
     
-    def get_files_in_folder(self, folder_id: str) -> List[Dict]:
-        """Get all files in a folder."""
+    def get_files_in_folder(self, folder_id: str, recursive: bool = True) -> List[Dict]:
+        """Get all files in a folder, optionally searching recursively through subfolders."""
+        all_files = []
+        
         try:
+            # Get immediate children of the folder
             results = self.service.files().list(
                 q=f"'{folder_id}' in parents and trashed=false",
                 spaces='drive',
                 fields='files(id, name, mimeType, size)'
             ).execute()
-            return results.get('files', [])
+            items = results.get('files', [])
+            
+            for item in items:
+                if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    # It's a folder, recursively search it if recursive=True
+                    if recursive:
+                        subfolder_files = self.get_files_in_folder(item['id'], recursive=True)
+                        all_files.extend(subfolder_files)
+                else:
+                    # It's a file, add it to our list
+                    all_files.append(item)
+            
+            return all_files
         except HttpError as error:
             console.print(f"[red]Error getting files from folder: {error}[/red]")
             return []
@@ -185,10 +200,11 @@ class GoogleDriveOrganizer:
             console.print(f"[yellow]Warning: Could not extract text from PDF: {e}[/yellow]")
             return ""
     
-    def classify_file(self, file_name: str, file_content: Optional[bytes] = None) -> Tuple[Optional[str], Optional[str]]:
-        """Classify a file based on filename and optionally content."""
+    def classify_file(self, file_name: str, file_content: Optional[bytes] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Classify a file based on filename and optionally content. Returns (company, statement_type, account_info)."""
         company = None
         statement_type = None
+        account_info = None
         
         # Import patterns from config
         from config import COMPANY_PATTERNS, STATEMENT_PATTERNS
@@ -208,6 +224,9 @@ class GoogleDriveOrganizer:
                 statement_type = stmt_type
                 break
         
+        # Extract account information
+        account_info = self.extract_account_info(file_name, file_content)
+        
         # If filename analysis didn't work, try PDF content
         if (not company or not statement_type) and file_content:
             pdf_text = self.extract_text_from_pdf(file_content)
@@ -226,21 +245,191 @@ class GoogleDriveOrganizer:
                     if any(pattern in pdf_lower for pattern in patterns):
                         statement_type = stmt_type
                         break
+            
+            # Extract account info from PDF content if not found in filename
+            if not account_info:
+                account_info = self.extract_account_info_from_text(pdf_text)
         
-        return company, statement_type
+        return company, statement_type, account_info
+    
+    def extract_account_info(self, file_name: str, file_content: Optional[bytes] = None) -> Optional[str]:
+        """Extract account information from filename or content."""
+        import re
+        
+        # Common account patterns
+        account_patterns = [
+            r'account[:\s_]*([A-Z0-9\-]+)',  # Account: 1234-5678 or account_1234-5678
+            r'#([A-Z0-9\-]+)',              # #1234-5678
+            r'ending[:\s]*([0-9]{4})',      # ending 1234
+            r'last[:\s]*([0-9]{4})',        # last 1234
+            r'([0-9]{4}[-*][0-9]{4}[-*][0-9]{4}[-*][0-9]{4})',  # Credit card format
+            r'checking[:\s]*([A-Z0-9\-]+)', # Checking: 1234-5678
+            r'savings[:\s]*([A-Z0-9\-]+)',  # Savings: 1234-5678
+            r'brokerage[:\s]*([A-Z0-9\-]+)', # Brokerage: 1234-5678
+        ]
+        
+        # Check filename first
+        for pattern in account_patterns:
+            match = re.search(pattern, file_name, re.IGNORECASE)
+            if match:
+                return match.group(1) if match.groups() else match.group(0)
+        
+        # Check PDF content if available
+        if file_content:
+            pdf_text = self.extract_text_from_pdf(file_content)
+            for pattern in account_patterns:
+                match = re.search(pattern, pdf_text, re.IGNORECASE)
+                if match:
+                    return match.group(1) if match.groups() else match.group(0)
+        
+        return None
+    
+    def extract_account_info_from_text(self, text: str) -> Optional[str]:
+        """Extract account information from text content."""
+        import re
+        
+        # Look for account numbers in text
+        account_patterns = [
+            r'account[:\s]*([A-Z0-9\-]+)',
+            r'#([A-Z0-9\-]+)',
+            r'ending[:\s]*([0-9]{4})',
+            r'last[:\s]*([0-9]{4})',
+            r'([0-9]{4}[-*][0-9]{4}[-*][0-9]{4}[-*][0-9]{4})',
+        ]
+        
+        for pattern in account_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1) if match.groups() else match.group(0)
+        
+        return None
+    
+    def get_last_digits(self, account_info: str, num_digits: int = 4) -> str:
+        """Extract the last N digits from account information."""
+        import re
+        
+        # Remove all non-alphanumeric characters and get digits/letters
+        clean_account = re.sub(r'[^A-Z0-9]', '', account_info.upper())
+        
+        # If it's shorter than requested digits, return the whole thing
+        if len(clean_account) <= num_digits:
+            return clean_account
+        
+        # Return last N characters
+        return clean_account[-num_digits:]
+    
+    def find_matching_existing_folder(self, company_folder_id: str, account_type: str, account_digits: str) -> Optional[str]:
+        """Find existing folder that matches the account type and digits."""
+        try:
+            # Get all folders in the company folder
+            results = self.service.files().list(
+                q=f"'{company_folder_id}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            folders = results.get('files', [])
+            
+            for folder in folders:
+                folder_name = folder['name'].lower()
+                
+                # Check if folder contains the account digits
+                if account_digits.lower() in folder_name:
+                    # Check if it's the right type of account
+                    if any(keyword in folder_name for keyword in [
+                        account_type.lower(),
+                        'checking' if account_type.lower() == 'bank' else '',
+                        'savings' if account_type.lower() == 'bank' else '',
+                        'credit' if account_type.lower() == 'credit card' else '',
+                        'brokerage' if account_type.lower() == 'investment' else '',
+                    ]):
+                        return folder['name']  # Return the actual existing folder name
+            
+            return None
+            
+        except HttpError as error:
+            console.print(f"[red]Error finding existing folders: {error}[/red]")
+            return None
+    
+    def find_target_folder(self, dest_folder_id: str, company: str, statement_type: str, account_info: Optional[str]) -> Optional[str]:
+        """Find the best matching existing folder for this statement."""
+        try:
+            # Get all folders in Statements by Account
+            results = self.service.files().list(
+                q=f"'{dest_folder_id}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            folders = results.get('files', [])
+            
+            # Define company and type keywords
+            company_keywords = {
+                'american express': ['amex', 'american express', 'blue'],
+                'chase': ['chase', 'freedom'],
+                'citi': ['citi', 'best buy', 'american airlines', 'double cash'],
+                'schwab': ['schwab'],
+                'capital one': ['capital one', 'quicksilver'],
+                'synchrony': ['synchrony', 'amazon store'],
+                'sofi': ['sofi'],
+            }
+            
+            type_keywords = {
+                'bank statement': ['checking', 'savings', 'money'],
+                'credit card statement': ['credit', 'card'],
+                'investment statement': ['brokerage', 'ira', 'broker'],
+                'loan statement': ['loan'],
+            }
+            
+            if account_info:
+                account_digits = self.get_last_digits(account_info, 4)
+                
+                # Look for folders that contain the account digits
+                for folder in folders:
+                    folder_name = folder['name'].lower()
+                    if account_digits.lower() in folder_name:
+                        # Check if company matches
+                        if company in company_keywords:
+                            if any(keyword in folder_name for keyword in company_keywords[company]):
+                                return folder['id']
+                
+                # Look for folders that match company and account type
+                for folder in folders:
+                    folder_name = folder['name'].lower()
+                    
+                    # Check company match
+                    if company in company_keywords:
+                        if any(keyword in folder_name for keyword in company_keywords[company]):
+                            # Check account type match
+                            if statement_type in type_keywords:
+                                if any(keyword in folder_name for keyword in type_keywords[statement_type]):
+                                    return folder['id']
+            
+            return None
+            
+        except HttpError as error:
+            console.print(f"[red]Error finding target folder: {error}[/red]")
+            return None
     
     def organize_statements(self, source_folder_id: str, dest_folder_id: str, dry_run: bool = False) -> Dict:
         """Organize statements from source folder to destination folder."""
         console.print(f"\n[bold blue]Starting statement organization...[/bold blue]")
         
-        # Get files from source folder
-        files = self.get_files_in_folder(source_folder_id)
+        # Get files from source folder (recursively)
+        console.print("Searching for files recursively through all subfolders...")
+        files = self.get_files_in_folder(source_folder_id, recursive=True)
         
         if not files:
-            console.print("[yellow]No files found in source folder[/yellow]")
+            console.print("[yellow]No files found in source folder or its subfolders[/yellow]")
             return {}
         
         console.print(f"Found {len(files)} files to process")
+        
+        # Show file types found
+        file_types = {}
+        for file in files:
+            ext = os.path.splitext(file['name'])[1].lower()
+            file_types[ext] = file_types.get(ext, 0) + 1
+        
+        console.print(f"File types found: {dict(file_types)}")
         
         # Statistics
         stats = {
@@ -275,7 +464,7 @@ class GoogleDriveOrganizer:
                     file_content = self.download_file(file['id'])
                     
                     # Classify the file
-                    company, statement_type = self.classify_file(file['name'], file_content)
+                    company, statement_type, account_info = self.classify_file(file['name'], file_content)
                     
                     if not company or not statement_type:
                         console.print(f"[yellow]Could not classify: {file['name']}[/yellow]")
@@ -283,31 +472,47 @@ class GoogleDriveOrganizer:
                         progress.advance(task)
                         continue
                     
-                    # Create folder structure if needed
-                    company_folder_id = self.find_folder_by_name(company, dest_folder_id)
-                    if not company_folder_id:
-                        if not dry_run:
-                            company_folder_id = self.create_folder(company, dest_folder_id)
-                        else:
-                            console.print(f"[blue]Would create folder: {company}[/blue]")
+                    # Find the appropriate existing folder or create new structure
+                    target_folder_id = self.find_target_folder(dest_folder_id, company, statement_type, account_info)
                     
-                    if company_folder_id:
-                        statement_folder_id = self.find_folder_by_name(statement_type, company_folder_id)
-                        if not statement_folder_id:
-                            if not dry_run:
-                                statement_folder_id = self.create_folder(statement_type, company_folder_id)
-                            else:
-                                console.print(f"[blue]Would create folder: {company}/{statement_type}[/blue]")
-                        
-                        # Copy file to destination
-                        if statement_folder_id and not dry_run:
-                            success = self.copy_file(file['id'], statement_folder_id)
+                    if target_folder_id:
+                        # Found existing folder, use it directly
+                        if not dry_run:
+                            success = self.copy_file(file['id'], target_folder_id)
                             if success:
                                 stats['copied'] += 1
                             else:
                                 stats['errors'] += 1
-                        elif dry_run:
-                            console.print(f"[blue]Would copy: {file['name']} → {company}/{statement_type}/[/blue]")
+                        else:
+                            # Get folder name for display
+                            try:
+                                folder_info = self.service.files().get(fileId=target_folder_id, fields='name').execute()
+                                folder_name = folder_info['name']
+                                console.print(f"[green]Would copy: {file['name']} → {folder_name}/ (existing folder)[/green]")
+                            except:
+                                console.print(f"[green]Would copy: {file['name']} → existing folder[/green]")
+                            stats['copied'] += 1
+                    else:
+                        # No existing folder found, create new structure
+                        company_folder_id = self.find_folder_by_name(company, dest_folder_id)
+                        if not company_folder_id and not dry_run:
+                            company_folder_id = self.create_folder(company, dest_folder_id)
+                        elif not company_folder_id and dry_run:
+                            console.print(f"[blue]Would create folder: {company}[/blue]")
+                            
+                        # For dry run, show what would happen
+                        if dry_run:
+                            if account_info:
+                                clean_type = statement_type.replace(" statement", "").replace("_statement", "")
+                                account_digits = self.get_last_digits(account_info, 4)
+                                folder_path = f"{company}/{clean_type} -{account_digits}"
+                                console.print(f"[blue]Would copy: {file['name']} → {folder_path}/ (new folder)[/blue]")
+                            else:
+                                clean_type = statement_type.replace(" statement", "").replace("_statement", "")
+                                folder_path = f"{company}/{clean_type}"
+                                console.print(f"[blue]Would copy: {file['name']} → {folder_path}/[/blue]")
+                            if account_info:
+                                console.print(f"[blue]  Account: {account_info} → Last 4: {self.get_last_digits(account_info, 4)}[/blue]")
                             stats['copied'] += 1
                     
                     stats['processed'] += 1
