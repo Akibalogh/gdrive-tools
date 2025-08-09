@@ -17,7 +17,7 @@ import tempfile
 import click
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
 from dotenv import load_dotenv
 
 from google.auth.transport.requests import Request
@@ -164,6 +164,162 @@ class GoogleDriveOrganizer:
             console.print(f"[red]Error downloading file: {error}[/red]")
             return None
     
+    def rename_folder(self, folder_id: str, new_name: str) -> bool:
+        """Rename a Google Drive folder."""
+        try:
+            # Update the folder name
+            file_metadata = {'name': new_name}
+            updated_folder = self.service.files().update(
+                fileId=folder_id,
+                body=file_metadata
+            ).execute()
+            
+            console.print(f"[green]✓ Renamed folder to: {new_name}[/green]")
+            return True
+            
+        except HttpError as error:
+            console.print(f"[red]Error renaming folder: {error}[/red]")
+            return False
+
+    def get_folder_info(self, folder_id: str) -> Optional[dict]:
+        """Get folder information including current name."""
+        try:
+            folder = self.service.files().get(
+                fileId=folder_id,
+                fields='id,name,parents'
+            ).execute()
+            return folder
+        except HttpError as error:
+            console.print(f"[red]Error getting folder info: {error}[/red]")
+            return None
+
+    def find_folder_by_exact_name(self, folder_name: str, parent_folder_id: str = None) -> Optional[str]:
+        """Find a folder by exact name match in a specific parent folder."""
+        try:
+            query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            if parent_folder_id:
+                query += f" and '{parent_folder_id}' in parents"
+            
+            results = self.service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            
+            folders = results.get('files', [])
+            if folders:
+                return folders[0]['id']
+            return None
+            
+        except HttpError as error:
+            console.print(f"[red]Error finding folder: {error}[/red]")
+            return None
+
+    def batch_rename_folders(self, rename_mapping: dict, dry_run: bool = True) -> dict:
+        """Batch rename multiple folders with progress tracking."""
+        results = {
+            'success': [],
+            'failed': [],
+            'skipped': []
+        }
+        
+        console.print(f"\n[bold blue]{'DRY RUN: ' if dry_run else ''}Batch Renaming {len(rename_mapping)} Folders[/bold blue]")
+        
+        # Find destination folder
+        dest_folder_id = self.find_folder_by_name('Statements by Account')
+        if not dest_folder_id:
+            console.print("[red]Error: Could not find 'Statements by Account' folder[/red]")
+            return results
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+        ) as progress:
+            
+            task = progress.add_task("Renaming folders...", total=len(rename_mapping))
+            
+            for old_name, new_name in rename_mapping.items():
+                progress.update(task, description=f"Processing: {old_name[:30]}...")
+                
+                try:
+                    # Find the folder by old name
+                    folder_id = self.find_folder_by_exact_name(old_name, dest_folder_id)
+                    
+                    if not folder_id:
+                        console.print(f"[yellow]⚠️  Folder not found: {old_name}[/yellow]")
+                        results['skipped'].append(old_name)
+                        progress.advance(task)
+                        continue
+                    
+                    # Get current folder info
+                    folder_info = self.get_folder_info(folder_id)
+                    if not folder_info:
+                        results['failed'].append(old_name)
+                        progress.advance(task)
+                        continue
+                    
+                    current_name = folder_info['name']
+                    
+                    if current_name == new_name:
+                        console.print(f"[dim]Already correct: {new_name}[/dim]")
+                        results['skipped'].append(old_name)
+                        progress.advance(task)
+                        continue
+                    
+                    if dry_run:
+                        console.print(f"[cyan]Would rename: '{current_name}' → '{new_name}'[/cyan]")
+                        results['success'].append(old_name)
+                    else:
+                        # Actually rename the folder
+                        if self.rename_folder(folder_id, new_name):
+                            results['success'].append(old_name)
+                        else:
+                            results['failed'].append(old_name)
+                    
+                except Exception as e:
+                    console.print(f"[red]Error processing {old_name}: {e}[/red]")
+                    results['failed'].append(old_name)
+                
+                progress.advance(task)
+        
+        return results
+
+    def backup_folder_structure(self, parent_folder_id: str) -> dict:
+        """Create a backup of the current folder structure."""
+        try:
+            console.print("[blue]Creating backup of folder structure...[/blue]")
+            
+            results = self.service.files().list(
+                q=f"'{parent_folder_id}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+                spaces='drive',
+                fields='files(id, name, parents, createdTime, modifiedTime)'
+            ).execute()
+            
+            folders = results.get('files', [])
+            
+            from datetime import datetime
+            backup_data = {
+                'backup_date': datetime.now().isoformat(),
+                'parent_folder_id': parent_folder_id,
+                'total_folders': len(folders),
+                'folders': folders
+            }
+            
+            # Save backup to local file
+            backup_filename = f"folder_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(backup_filename, 'w') as f:
+                json.dump(backup_data, f, indent=2)
+            
+            console.print(f"[green]✓ Backup saved to: {backup_filename}[/green]")
+            return backup_data
+            
+        except HttpError as error:
+            console.print(f"[red]Error creating backup: {error}[/red]")
+            return {}
+
     def copy_file(self, file_id: str, destination_folder_id: str, new_name: Optional[str] = None) -> bool:
         """Copy a file to a new location in Google Drive."""
         try:
@@ -303,23 +459,45 @@ class GoogleDriveOrganizer:
         """Extract account information from text content."""
         import re
         
-        # Look for account numbers in text
+        # Enhanced account number patterns - DIGITS ONLY
         account_patterns = [
-            r'account[:\s]*([A-Z0-9\-]+)',
-            r'#([A-Z0-9\-]+)',
-            r'ending[:\s]*([0-9]{4})',
-            r'last[:\s]*([0-9]{4})',
-            r'([0-9]{4}[-*][0-9]{4}[-*][0-9]{4}[-*][0-9]{4})',
+            # Full account numbers with clear delimiters
+            r'account\s*(?:number|#|no\.?)[:\s]*([0-9]{4,20})',  # account number: 12345678
+            r'account[:\s]+([0-9]{4,20})',  # account: 12345678
+            r'acct\.?\s*(?:number|#|no\.?)[:\s]*([0-9]{4,20})',  # acct number: 12345678
+            r'acct[:\s]+([0-9]{4,20})',  # acct: 12345678
+            
+            # Ending patterns - most common in statements
+            r'ending\s+in[:\s]*([0-9]{3,8})',  # ending in 12345
+            r'ending[:\s]+([0-9]{3,8})',  # ending: 12345
+            r'account\s+ending[:\s]+([0-9]{3,8})',  # account ending: 12345
+            
+            # Card patterns with masking
+            r'(?:x{4,}|\\*{4,})[^0-9]*([0-9]{4,5})',  # xxxx1234 or ****12345
+            r'card\s+ending[:\s]*([0-9]{4,5})',  # card ending: 1234
+            
+            # Hyphenated patterns (common format)
+            r'([0-9]{4}-[0-9]{4,8})',  # 1234-56789
+            r'([0-9]{6,8}-[0-9]{2,4})',  # 123456-78
+            
+            # Direct number patterns (be more selective)
+            r'\\b([0-9]{8,16})\\b',  # 8-16 digit standalone numbers
         ]
         
         for pattern in account_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                return match.group(1) if match.groups() else match.group(0)
+                account = match.group(1) if match.groups() else match.group(0)
+                # Clean and validate
+                clean_account = account.replace('-', '').replace(' ', '')
+                if (len(clean_account) >= 3 and 
+                    clean_account.isdigit() and 
+                    len(set(clean_account)) > 1):  # Not all same digit
+                    return account
         
         return None
     
-    def get_last_digits(self, account_info: str, num_digits: int = 4) -> str:
+    def get_last_digits(self, account_info: str, num_digits: int = 5) -> str:
         """Extract the last N digits from account information."""
         import re
         
@@ -555,8 +733,12 @@ class GoogleDriveOrganizer:
 @click.option('--statements-by-account', default='Statements by Account', help='Name of statements by account folder')
 @click.option('--clear-cache', is_flag=True, help='Clear the file classification cache')
 @click.option('--export-cache', help='Export cache to specified file')
+@click.option('--rename-folders', is_flag=True, help='Rename folders with confirmed account numbers')
+@click.option('--backup-folders', is_flag=True, help='Create backup of current folder structure')
+@click.option('--test-rename', help='Test renaming a single folder (format: "old_name,new_name")')
 def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_run: bool, 
-         monthly_statements: str, statements_by_account: str, clear_cache: bool, export_cache: str):
+         monthly_statements: str, statements_by_account: str, clear_cache: bool, export_cache: str,
+         rename_folders: bool, backup_folders: bool, test_rename: str):
     """Organize Google Drive statements by company and type."""
     
     console.print("[bold green]Google Drive Statement Organizer[/bold green]")
@@ -580,6 +762,102 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
     if export_cache:
         export_file = organizer.file_mapping.export_mapping(export_cache)
         console.print(f"[green]✓ Cache exported to {export_file}[/green]")
+        return 0
+    
+    # Handle folder operations
+    if backup_folders:
+        dest_folder_id = organizer.find_folder_by_name(statements_by_account)
+        if dest_folder_id:
+            backup_data = organizer.backup_folder_structure(dest_folder_id)
+            console.print(f"[green]✓ Backup created with {backup_data.get('total_folders', 0)} folders[/green]")
+        return 0
+    
+    if test_rename:
+        if ',' not in test_rename:
+            console.print("[red]Error: test-rename format should be 'old_name,new_name'[/red]")
+            return 1
+        
+        old_name, new_name = test_rename.split(',', 1)
+        old_name, new_name = old_name.strip(), new_name.strip()
+        
+        dest_folder_id = organizer.find_folder_by_name(statements_by_account)
+        if not dest_folder_id:
+            console.print("[red]Error: Could not find 'Statements by Account' folder[/red]")
+            return 1
+        
+        folder_id = organizer.find_folder_by_exact_name(old_name, dest_folder_id)
+        if not folder_id:
+            console.print(f"[red]Error: Folder '{old_name}' not found[/red]")
+            return 1
+        
+        if dry_run:
+            console.print(f"[cyan]Would rename: '{old_name}' → '{new_name}'[/cyan]")
+        else:
+            success = organizer.rename_folder(folder_id, new_name)
+            if success:
+                console.print(f"[green]✓ Successfully renamed folder[/green]")
+            else:
+                console.print(f"[red]✗ Failed to rename folder[/red]")
+                return 1
+        return 0
+    
+    if rename_folders:
+        # Define confirmed renamings
+        # Complete mapping for all 25 folders
+        confirmed_renames = {
+            # Chase (2 accounts)
+            "Chase Freedom Statement": "Chase Freedom -64649",
+            "Chase Amazon Prime Statement": "Chase Amazon Prime -11014",
+            
+            # Citi (3 accounts) 
+            "Citi Double Cash Statement": "Citi Double Cash -80521",
+            "Citi American Airlines Statement": "Citi American Airlines -35086",
+            "Citi Best Buy Statement": "Citi Best Buy -91383",
+            
+            # American Express (4 accounts)
+            "American Express Blue Cash Statement": "American Express Blue Cash -91005",
+            "American Express Gold Card Statement": "American Express Gold Card -41004",
+            "American Express Platinum Card Statement": "American Express Platinum Card -31002", 
+            "American Express Business Gold Statement": "American Express Business Gold -71007",
+            
+            # Capital One (2 accounts)
+            "Capital One Quicksilver Statement": "Capital One Quicksilver -40318",
+            "Capital One Savor Statement": "Capital One Savor -40906",
+            
+            # Schwab (5 accounts)
+            "Schwab Brokerage Statement": "Schwab Brokerage -23115",
+            "Schwab AmEx Platinum Statement": "Schwab AmEx Platinum -91003",
+            "Schwab Bank Statement": "Schwab Bank -06914",
+            "Roth IRA Robo -121": "Roth IRA Robo -73121",  # From PDF!
+            "Roth IRA Manual -625": "Roth IRA Manual -24625",  # From PDF!
+            
+            # Other Financial (5 accounts)
+            "SoFi Money Statement": "SoFi Money -20516", 
+            "PayPal Statement": "PayPal -53762",
+            "Wise Statement": "Wise -18903",
+            "Amazon Statement": "Amazon -27717",
+            "AltoIRA": "AltoIRA -48915",  # User provided
+            
+            # Crypto (2 accounts - simplified names)
+            "Swan Bitcoin / Prime Trust LLC": "Swan Bitcoin",
+            "OkCoin": "OkCoin"  # Already simple
+        }
+        
+        console.print(f"[bold yellow]Renaming {len(confirmed_renames)} folders with confirmed account numbers[/bold yellow]")
+        
+        results = organizer.batch_rename_folders(confirmed_renames, dry_run=dry_run)
+        
+        # Display results
+        console.print(f"\n[bold blue]Rename Results:[/bold blue]")
+        console.print(f"✅ Success: {len(results['success'])}")
+        console.print(f"⚠️  Skipped: {len(results['skipped'])}")
+        console.print(f"❌ Failed: {len(results['failed'])}")
+        
+        if results['failed']:
+            console.print(f"\n[red]Failed folders:[/red]")
+            for folder in results['failed']:
+                console.print(f"  • {folder}")
+        
         return 0
     
     # Find folders if IDs not provided
