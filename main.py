@@ -372,15 +372,35 @@ class GoogleDriveOrganizer:
             console.print(f"[red]Error creating backup: {error}[/red]")
             return {}
 
-    def copy_file(self, file_id: str, destination_folder_id: str, new_name: Optional[str] = None) -> bool:
-        """Copy a file to a new location in Google Drive."""
+    def copy_file(self, file_id: str, destination_folder_id: str, new_name: Optional[str] = None, check_duplicates: bool = True) -> bool:
+        """Copy a file to a new location in Google Drive with duplicate detection."""
         try:
             # Get file metadata
             file_metadata = self.service.files().get(fileId=file_id).execute()
+            original_name = file_metadata['name']
+            
+            # Check for duplicates if requested
+            if check_duplicates:
+                duplicates = self.check_for_duplicates(file_id, destination_folder_id, original_name)
+                
+                if duplicates['recommended_action'] == 'skip':
+                    console.print(f"[yellow]⏭️  Skipped: {original_name} - {duplicates['reason']}[/yellow]")
+                    return True  # Return True since this is expected behavior
+                
+                elif duplicates['recommended_action'] == 'rename':
+                    if not new_name:  # Only auto-rename if no custom name provided
+                        new_name = self.generate_unique_filename(original_name, destination_folder_id)
+                        console.print(f"[blue]🔄 Renaming duplicate: {original_name} → {new_name}[/blue]")
+                    else:
+                        console.print(f"[blue]🔄 Using custom name for duplicate: {original_name} → {new_name}[/blue]")
+                
+                elif duplicates['recommended_action'] == 'copy':
+                    if duplicates['exact_filename'] or duplicates['content_duplicate']:
+                        console.print(f"[blue]ℹ️  Info: {original_name} - {duplicates['reason']}[/blue]")
             
             # Prepare copy metadata
             copy_metadata = {
-                'name': new_name or file_metadata['name'],
+                'name': new_name or original_name,
                 'parents': [destination_folder_id]
             }
             
@@ -759,7 +779,7 @@ class GoogleDriveOrganizer:
             console.print(f"[red]Error finding target folder: {error}[/red]")
             return None
     
-    def organize_statements(self, source_folder_id: str, dest_folder_id: str, dry_run: bool = False) -> Dict:
+    def organize_statements(self, source_folder_id: str, dest_folder_id: str, dry_run: bool = False, duplicate_handling: str = 'smart') -> Dict:
         """Organize statements from source folder to destination folder."""
         console.print(f"\n[bold blue]Starting statement organization...[/bold blue]")
         
@@ -833,11 +853,35 @@ class GoogleDriveOrganizer:
                     if target_folder_id:
                         # Found existing folder, use it directly
                         if not dry_run:
-                            success = self.copy_file(file['id'], target_folder_id)
-                            if success:
-                                stats['copied'] += 1
-                            else:
-                                stats['errors'] += 1
+                            # Apply duplicate handling strategy
+                            if duplicate_handling == 'skip':
+                                # Skip all duplicates
+                                success = self.copy_file(file['id'], target_folder_id, check_duplicates=True)
+                                if success:
+                                    stats['copied'] += 1
+                                else:
+                                    stats['errors'] += 1
+                            elif duplicate_handling == 'rename':
+                                # Force rename all duplicates
+                                success = self.copy_file(file['id'], target_folder_id, check_duplicates=True)
+                                if success:
+                                    stats['copied'] += 1
+                                else:
+                                    stats['errors'] += 1
+                            elif duplicate_handling == 'force':
+                                # Force copy without duplicate checking
+                                success = self.copy_file(file['id'], target_folder_id, check_duplicates=False)
+                                if success:
+                                    stats['copied'] += 1
+                                else:
+                                    stats['errors'] += 1
+                            else:  # smart (default)
+                                # Use intelligent duplicate detection
+                                success = self.copy_file(file['id'], target_folder_id, check_duplicates=True)
+                                if success:
+                                    stats['copied'] += 1
+                                else:
+                                    stats['errors'] += 1
                         else:
                             # Get folder name for display
                             try:
@@ -880,6 +924,269 @@ class GoogleDriveOrganizer:
         
         return stats
 
+    def check_for_duplicates(self, file_id: str, destination_folder_id: str, file_name: str = None) -> Dict:
+        """
+        Check for various types of duplicates before copying a file.
+        Returns dict with duplicate info and recommended action.
+        """
+        try:
+            # Get file metadata if not provided
+            if not file_name:
+                file_metadata = self.service.files().get(fileId=file_id, fields='name,size,md5Checksum').execute()
+                file_name = file_metadata['name']
+                file_size = file_metadata.get('size', '0')
+                file_md5 = file_metadata.get('md5Checksum')
+            else:
+                file_metadata = self.service.files().get(fileId=file_id, fields='size,md5Checksum').execute()
+                file_size = file_metadata.get('size', '0')
+                file_md5 = file_metadata.get('md5Checksum')
+            
+            duplicates = {
+                'exact_filename': None,
+                'content_duplicate': None,
+                'similar_filename': [],
+                'recommended_action': 'copy',
+                'reason': 'No duplicates found'
+            }
+            
+            # 1. Check for exact filename match
+            query = f"name='{file_name}' and '{destination_folder_id}' in parents and trashed=false"
+            exact_matches = self.service.files().list(q=query, fields='files(id,name,size,md5Checksum)').execute()
+            
+            if exact_matches['files']:
+                exact_match = exact_matches['files'][0]
+                duplicates['exact_filename'] = exact_match
+                
+                # Check if it's the same file (same ID)
+                if exact_match['id'] == file_id:
+                    duplicates['recommended_action'] = 'skip'
+                    duplicates['reason'] = 'File already exists in destination (same file ID)'
+                else:
+                    # Check if content is identical (same MD5)
+                    if file_md5 and exact_match.get('md5Checksum') and file_md5 == exact_match['md5Checksum']:
+                        duplicates['recommended_action'] = 'skip'
+                        duplicates['reason'] = 'Identical file already exists in destination'
+                    else:
+                        duplicates['recommended_action'] = 'rename'
+                        duplicates['reason'] = 'File with same name exists but content differs'
+            
+            # 2. Check for content duplicates (same MD5 hash)
+            if file_md5:
+                query = f"md5Checksum='{file_md5}' and '{destination_folder_id}' in parents and trashed=false"
+                content_matches = self.service.files().list(q=query, fields='files(id,name,size,md5Checksum)').execute()
+                
+                if content_matches['files']:
+                    # Filter out the current file
+                    content_dupes = [f for f in content_matches['files'] if f['id'] != file_id]
+                    if content_dupes:
+                        duplicates['content_duplicate'] = content_dupes[0]
+                        if duplicates['recommended_action'] == 'copy':
+                            duplicates['recommended_action'] = 'skip'
+                            duplicates['reason'] = 'Identical content already exists in destination'
+            
+            # 3. Check for similar filenames (same base name, different extensions or dates)
+            base_name = os.path.splitext(file_name)[0]
+            # Remove common date patterns
+            base_name_clean = re.sub(r'[-_]\d{4}[-_]\d{2}[-_]\d{2}', '', base_name)
+            base_name_clean = re.sub(r'[-_]\d{8}', '', base_name_clean)
+            
+            query = f"'{destination_folder_id}' in parents and trashed=false"
+            all_files = self.service.files().list(q=query, fields='files(id,name,size)').execute()
+            
+            for file in all_files['files']:
+                if file['id'] != file_id:
+                    other_base = os.path.splitext(file['name'])[0]
+                    other_base_clean = re.sub(r'[-_]\d{4}[-_]\d{2}[-_]\d{2}', '', other_base)
+                    other_base_clean = re.sub(r'[-_]\d{8}', '', other_base_clean)
+                    
+                    # Check for similar base names
+                    if (base_name_clean.lower() == other_base_clean.lower() or 
+                        base_name_clean.lower().startswith(other_base_clean.lower()) or
+                        other_base_clean.lower().startswith(base_name_clean.lower())):
+                        duplicates['similar_filename'].append(file)
+            
+            return duplicates
+            
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not check for duplicates: {e}[/yellow]")
+            return {
+                'exact_filename': None,
+                'content_duplicate': None,
+                'similar_filename': [],
+                'recommended_action': 'copy',
+                'reason': f'Error checking duplicates: {e}'
+            }
+
+    def generate_unique_filename(self, original_name: str, destination_folder_id: str) -> str:
+        """
+        Generate a unique filename for the destination folder.
+        Handles duplicates by adding (1), (2), etc.
+        """
+        base_name, extension = os.path.splitext(original_name)
+        counter = 1
+        new_name = original_name
+        
+        while True:
+            query = f"name='{new_name}' and '{destination_folder_id}' in parents and trashed=false"
+            matches = self.service.files().list(q=query, fields='files(id)').execute()
+            
+            if not matches['files']:
+                break
+            
+            new_name = f"{base_name} ({counter}){extension}"
+            counter += 1
+            
+            # Prevent infinite loop
+            if counter > 100:
+                new_name = f"{base_name}_{int(time.time())}{extension}"
+                break
+        
+        return new_name
+
+    def analyze_duplicates(self, destination_folder_id: str) -> Dict:
+        """
+        Analyze destination folders for potential duplicates and provide a report.
+        """
+        console.print(f"\n[bold blue]Analyzing duplicates in destination folders...[/bold blue]")
+        
+        try:
+            # Get all files in destination folders
+            all_files = self.get_files_in_folder(destination_folder_id, recursive=True)
+            
+            if not all_files:
+                console.print("[yellow]No files found in destination folders[/yellow]")
+                return {}
+            
+            console.print(f"Found {len(all_files)} files to analyze")
+            
+            # Group files by MD5 hash and filename
+            md5_groups = {}
+            filename_groups = {}
+            potential_duplicates = []
+            
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                task = progress.add_task("Analyzing files...", total=len(all_files))
+                
+                for file in all_files:
+                    progress.update(task, description=f"Analyzing: {file['name']}")
+                    
+                    try:
+                        # Get file metadata with MD5
+                        file_metadata = self.service.files().get(
+                            fileId=file['id'], 
+                            fields='name,size,md5Checksum,parents'
+                        ).execute()
+                        
+                        file_name = file_metadata['name']
+                        file_size = file_metadata.get('size', '0')
+                        file_md5 = file_metadata.get('md5Checksum')
+                        file_parents = file_metadata.get('parents', [])
+                        
+                        # Group by MD5 hash
+                        if file_md5:
+                            if file_md5 not in md5_groups:
+                                md5_groups[file_md5] = []
+                            md5_groups[file_md5].append({
+                                'id': file['id'],
+                                'name': file_name,
+                                'size': file_size,
+                                'parents': file_parents
+                            })
+                        
+                        # Group by filename
+                        if file_name not in filename_groups:
+                            filename_groups[file_name] = []
+                        filename_groups[file_name].append({
+                            'id': file['id'],
+                            'name': file_name,
+                            'size': file_size,
+                            'md5': file_md5,
+                            'parents': file_parents
+                        })
+                        
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Could not analyze {file['name']}: {e}[/yellow]")
+                    
+                    progress.advance(task)
+            
+            # Find duplicates
+            duplicate_report = {
+                'total_files': len(all_files),
+                'md5_duplicates': [],
+                'filename_duplicates': [],
+                'summary': {}
+            }
+            
+            # MD5 duplicates (identical content)
+            for md5, files in md5_groups.items():
+                if len(files) > 1:
+                    duplicate_report['md5_duplicates'].append({
+                        'md5': md5,
+                        'files': files,
+                        'count': len(files)
+                    })
+            
+            # Filename duplicates (same name, potentially different content)
+            for filename, files in filename_groups.items():
+                if len(files) > 1:
+                    duplicate_report['filename_duplicates'].append({
+                        'filename': filename,
+                        'files': files,
+                        'count': len(files)
+                    })
+            
+            # Generate summary
+            duplicate_report['summary'] = {
+                'md5_duplicate_groups': len(duplicate_report['md5_duplicates']),
+                'filename_duplicate_groups': len(duplicate_report['filename_duplicates']),
+                'total_duplicate_files': sum(len(group['files']) for group in duplicate_report['md5_duplicates']) + 
+                                       sum(len(group['files']) for group in duplicate_report['filename_duplicates'])
+            }
+            
+            # Display results
+            console.print(f"\n[bold]Duplicate Analysis Results:[/bold]")
+            console.print(f"Total files analyzed: {duplicate_report['total_files']}")
+            console.print(f"MD5 duplicate groups: {duplicate_report['summary']['md5_duplicate_groups']}")
+            console.print(f"Filename duplicate groups: {duplicate_report['summary']['filename_duplicate_groups']}")
+            
+            if duplicate_report['md5_duplicates']:
+                console.print(f"\n[bold yellow]Content Duplicates (Identical Files):[/bold yellow]")
+                for group in duplicate_report['md5_duplicates']:
+                    console.print(f"  MD5: {group['md5'][:8]}... - {group['count']} files:")
+                    for file in group['files']:
+                        folder_name = "Unknown"
+                        if file['parents']:
+                            try:
+                                parent_info = self.service.files().get(fileId=file['parents'][0], fields='name').execute()
+                                folder_name = parent_info['name']
+                            except:
+                                pass
+                        console.print(f"    • {file['name']} ({folder_name}/)")
+            
+            if duplicate_report['filename_duplicates']:
+                console.print(f"\n[bold yellow]Filename Duplicates:[/bold yellow]")
+                for group in duplicate_report['filename_duplicates']:
+                    console.print(f"  Filename: {group['filename']} - {group['count']} files:")
+                    for file in group['files']:
+                        folder_name = "Unknown"
+                        if file['parents']:
+                            try:
+                                parent_info = self.service.files().get(fileId=file['parents'][0], fields='name').execute()
+                                folder_name = parent_info['name']
+                            except:
+                                pass
+                        console.print(f"    • {file['name']} ({folder_name}/) - Size: {file['size']} bytes")
+            
+            return duplicate_report
+            
+        except Exception as e:
+            console.print(f"[red]Error analyzing duplicates: {e}[/red]")
+            return {}
+
 
 @click.command()
 @click.option('--source-folder-id', envvar='SOURCE_FOLDER_ID', help='Google Drive folder ID for source folder')
@@ -894,9 +1201,12 @@ class GoogleDriveOrganizer:
 @click.option('--backup-folders', is_flag=True, help='Create backup of current folder structure')
 @click.option('--test-rename', help='Test renaming a single folder (format: "old_name,new_name")')
 @click.option('--workers', default=4, help='Number of parallel workers for processing (default: 4)')
+@click.option('--duplicate-handling', default='smart', type=click.Choice(['smart', 'skip', 'rename', 'force']), 
+              help='How to handle duplicates: smart=auto-detect, skip=skip all, rename=auto-rename, force=overwrite (default: smart)')
+@click.option('--analyze-duplicates', is_flag=True, help='Analyze and report on duplicates in destination folders')
 def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_run: bool, 
          monthly_statements: str, statements_by_account: str, clear_cache: bool, export_cache: str,
-         rename_folders: bool, backup_folders: bool, test_rename: str, workers: int):
+         rename_folders: bool, backup_folders: bool, test_rename: str, workers: int, duplicate_handling: str, analyze_duplicates: bool):
     """Organize Google Drive statements by company and type."""
     
     console.print("[bold green]Google Drive Statement Organizer[/bold green]")
@@ -928,6 +1238,17 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
         if dest_folder_id:
             backup_data = organizer.backup_folder_structure(dest_folder_id)
             console.print(f"[green]✓ Backup created with {backup_data.get('total_folders', 0)} folders[/green]")
+        return 0
+    
+    if analyze_duplicates:
+        dest_folder_id = organizer.find_folder_by_name(statements_by_account)
+        if dest_folder_id:
+            duplicate_report = organizer.analyze_duplicates(dest_folder_id)
+            if duplicate_report:
+                console.print(f"\n[green]✓ Duplicate analysis completed![/green]")
+        else:
+            console.print("[red]Error: Could not find 'Statements by Account' folder[/red]")
+            return 1
         return 0
     
     if test_rename:
@@ -1032,7 +1353,7 @@ def main(source_folder_id: str, dest_folder_id: str, credentials_file: str, dry_
             return 1
     
     # Organize statements
-    stats = organizer.organize_statements(source_folder_id, dest_folder_id, dry_run)
+    stats = organizer.organize_statements(source_folder_id, dest_folder_id, dry_run, duplicate_handling)
     
     # Display results
     console.print(f"\n[bold blue]Organization Complete![/bold blue]")

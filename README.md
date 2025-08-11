@@ -22,6 +22,9 @@ A sophisticated Python application that intelligently organizes financial statem
 - **Account-Based Folders**: Creates folders like "Chase Freedom Card -64649"
 - **Smart Folder Matching**: Maps files to existing organized folders automatically
 - **Duplicate Prevention**: Tracks processed files to avoid re-copying
+- **Smart Duplicate Detection**: Identifies content duplicates (MD5 hash), filename duplicates, and similar filenames
+- **Flexible Duplicate Handling**: Choose from smart detection, skip all, auto-rename, or force overwrite
+- **Duplicate Analysis**: Comprehensive reporting on existing duplicates in destination folders
 - **Recursive Processing**: Handles complex monthly folder structures
 
 ### 🛡️ **Production Ready**
@@ -95,6 +98,18 @@ python main.py --export-cache cache_backup.json
 # Adjust parallel workers (2-8 recommended)
 python main.py --workers 8  # Faster but may hit API limits
 python main.py --workers 2  # Slower but very safe
+```
+
+### **Duplicate Handling**
+```bash
+# Analyze existing duplicates in destination folders
+python main.py --analyze-duplicates
+
+# Handle duplicates with different strategies
+python main.py --duplicate-handling smart    # Auto-detect and handle intelligently
+python main.py --duplicate-handling skip     # Skip all duplicates
+python main.py --duplicate-handling rename   # Auto-rename duplicates
+python main.py --duplicate-handling force    # Force copy without checking
 ```
 
 ### **Backup & Recovery**
