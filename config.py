@@ -4,8 +4,8 @@ Configuration file for Google Drive Statement Organizer
 
 # Company patterns for classification
 COMPANY_PATTERNS = {
-    'chase': ['chase', 'jpmorgan', 'jpm', 'jp morgan'],
-    'wells fargo': ['wells fargo', 'wells_fargo', 'wellsfargo', 'wells', 'wf'],
+    'chase': ['chase', 'jpmorgan', 'jpm', 'jp morgan', '4649', '64649'],
+    'wells fargo': ['wells fargo', 'wells_fargo', 'wellsfargo', 'wells', 'wf', '5379'],
     'bank of america': ['bank of america', 'bank_of_america', 'bofa', 'boa', 'bankofamerica'],
     'capital one': ['capital one', 'capitalone', 'capone'],
     'american express': ['american express', 'american_express', 'amex', 'americanexpress', 'american-express'],
@@ -18,7 +18,7 @@ COMPANY_PATTERNS = {
     'barclays': ['barclays', 'barclaycard'],
     'fidelity': ['fidelity', 'fidelity investments'],
     'vanguard': ['vanguard', 'vanguard group'],
-    'schwab': ['schwab', 'charles schwab', 'charlesschwab'],
+    'schwab': ['schwab', 'charles schwab', 'charlesschwab', '417', '624', '485', '608', '121', '625'],
     'etrade': ['etrade', 'e*trade', 'etrade'],
     'robinhood': ['robinhood', 'robinhood markets'],
     'coinbase': ['coinbase', 'coinbase pro'],
